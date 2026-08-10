@@ -176,6 +176,45 @@
     return head[0] === factors[0] && head[1] === factors[1];
   }
 
+  /** "11" from saying 1×1, "81" from 8×1, etc. */
+  function looksLikeFactorConcat(value, a, b) {
+    const s = String(value);
+    const as = String(a);
+    const bs = String(b);
+    return s === as + bs || s === bs + as;
+  }
+
+  /**
+   * Final gate: reject mic guesses that are really the kid reading the problem.
+   * Returns the value to fill, or null to ignore.
+   */
+  function acceptSpokenAnswer(value, problem, transcript) {
+    if (value == null || !Number.isFinite(value)) return null;
+    if (!problem) return value;
+
+    const a = Number(problem.a);
+    const b = Number(problem.b);
+    const expected = Number(problem.expected);
+
+    if (looksLikeFactorConcat(value, a, b)) return null;
+
+    // Said a factor instead of the product/missing number (e.g. "one" on 8×1)
+    if (value !== expected && (value === a || value === b)) return null;
+
+    // 1×1 is uniquely ambiguous — only accept a lone "one"/"1"
+    if (a === 1 && b === 1 && expected === 1) {
+      const t = String(transcript || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!/^(1|one|won|juan)$/.test(t)) return null;
+      return 1;
+    }
+
+    return value;
+  }
+
   /**
    * Parse a spoken answer. Uses the current problem so reading
    * "one times one" / "eight one" does not overwrite the real answer.
@@ -199,10 +238,11 @@
       /\bx\b/.test(cleaned);
 
     // "eight times one equals eight" / "is 8" → answer after equals/is
-    const afterEquals = cleaned.split(/\b(?:equals|equal|=|is)\b/);
+    // Avoid splitting short words like "this" — use careful boundaries
+    const afterEquals = cleaned.split(/\b(?:equals|equal|=)\b|\bis\b/);
     if (afterEquals.length > 1) {
       const n = parseTailNumber(afterEquals[afterEquals.length - 1].trim());
-      if (n != null) return n;
+      if (n != null) return acceptSpokenAnswer(n, problem, afterEquals[afterEquals.length - 1]);
     }
 
     // Kid is reading the problem out loud — ignore
@@ -220,20 +260,22 @@
 
     // "eight one" / "one one" without "times" = reading factors, not 9 or 2
     if (problem && looksLikeReadingFactors(nums, problem.a, problem.b)) {
-      // Only accept if a clear third answer number is present and differs
       if (nums.length >= 3) {
         const last = nums[nums.length - 1];
-        const expected = Number(problem.expected);
-        if (last === expected) return last;
+        if (last === Number(problem.expected)) {
+          return acceptSpokenAnswer(last, problem, cleaned);
+        }
       }
       return null;
     }
 
     // Single clear number ("one", "8", "twelve")
-    if (nums.length === 1) return nums[0];
+    if (nums.length === 1) {
+      return acceptSpokenAnswer(nums[0], problem, cleaned);
+    }
 
     // Multiple unrelated numbers — take the last (often the answer)
-    return nums[nums.length - 1];
+    return acceptSpokenAnswer(nums[nums.length - 1], problem, cleaned);
   }
 
   function choosePromptType(problemType, a, b, operation) {
@@ -328,10 +370,19 @@
       if (!alts.length && transcript) alts.push(transcript);
 
       let value = null;
+      let matchedExpected = null;
+      const problem = session?.current || null;
+      const expected = problem ? Number(problem.expected) : null;
       for (const t of alts) {
-        value = parseSpokenNumber(t, session?.current || null);
-        if (value != null) break;
+        const v = parseSpokenNumber(t, problem);
+        if (v == null) continue;
+        if (expected != null && v === expected) {
+          matchedExpected = v;
+          break;
+        }
+        if (value == null) value = v;
       }
+      value = matchedExpected ?? value;
 
       if (value == null) {
         // Likely reading the problem aloud ("one times one") — ignore
@@ -343,9 +394,9 @@
       const already = String(box?.value || "").replace(/[^\d]/g, "");
       if (
         already &&
-        session?.current &&
-        Number(already) === Number(session.current.expected) &&
-        value !== Number(session.current.expected)
+        expected != null &&
+        Number(already) === expected &&
+        value !== expected
       ) {
         return;
       }
